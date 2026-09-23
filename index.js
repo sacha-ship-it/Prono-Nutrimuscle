@@ -479,3 +479,15 @@ async function updateClassement() {
     const channel = await client.channels.fetch(CLASSEMENT_CHANNEL_ID)
     const messages = await channel.messages.fetch({ limit: 5 })
     const existing = messages.find(m => m.author.id === client.user.id)
+    const embed = await buildClassementEmbed()
+    if (existing) {
+      await existing.edit({ embeds: [embed] })
+    } else {
+      await channel.send({ embeds: [embed] })
+    }
+  } catch (e) {
+    console.error('Erreur mise à jour classement:', e.message)
+  }
+}
+
+client.login(TOKEN)
