@@ -63,7 +63,7 @@ async function registerCommands() {
       .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
       .addStringOption(o => o.setName('date').setDescription('Date et heure du match').setRequired(true))
       .addStringOption(o => o.setName('cloture').setDescription('Date/heure de clôture des pronos').setRequired(true))
-      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs possibles séparés par des virgules').setRequired(true))
+      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs potentiels des 2 équipes séparés par des virgules').setRequired(true))
       .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
 
     new SlashCommandBuilder()
@@ -77,7 +77,7 @@ async function registerCommands() {
       .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true))
       .addStringOption(o => o.setName('resultat').setDescription('victoire_france / nul / defaite_france').setRequired(true))
       .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true))
-      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs français ayant marqué séparés par des virgules').setRequired(false)),
+      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs ayant marqué séparés par des virgules').setRequired(false)),
 
     new SlashCommandBuilder()
       .setName('classement')
@@ -240,14 +240,14 @@ client.on('interactionCreate', async interaction => {
 
     const selectButeur = new StringSelectMenuBuilder()
       .setCustomId(`select_buteur_${matchId}`)
-      .setPlaceholder('Choisis un buteur français')
+      .setPlaceholder('Choisis un buteur')
       .addOptions([
         ...match.buteurs.map(j => ({ label: j, value: j })),
-        { label: 'Aucun buteur français', value: 'aucun' }
+        { label: 'Aucun buteur', value: 'aucun' }
       ])
 
     await interaction.update({
-      content: '**Étape 2/3** — Choisis ton buteur français :',
+      content: '**Étape 2/3** — Choisis un buteur du match :',
       components: [new ActionRowBuilder().addComponents(selectButeur)]
     })
   }
@@ -310,7 +310,6 @@ client.on('interactionCreate', async interaction => {
   if (interaction.isButton() && interaction.customId.startsWith('skip_score_')) {
     const matchId = interaction.customId.replace('skip_score_', '')
     const prono = pronos.get(matchId)?.[interaction.user.id]
-
     const resultatLabels = { victoire_france: 'Victoire France', nul: 'Match Nul', defaite_france: 'Victoire adversaire' }
 
     await interaction.update({
@@ -480,15 +479,3 @@ async function updateClassement() {
     const channel = await client.channels.fetch(CLASSEMENT_CHANNEL_ID)
     const messages = await channel.messages.fetch({ limit: 5 })
     const existing = messages.find(m => m.author.id === client.user.id)
-    const embed = await buildClassementEmbed()
-    if (existing) {
-      await existing.edit({ embeds: [embed] })
-    } else {
-      await channel.send({ embeds: [embed] })
-    }
-  } catch (e) {
-    console.error('Erreur mise à jour classement:', e.message)
-  }
-}
-
-client.login(TOKEN)
