@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, REST, Routes, SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js')
+const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, EmbedBuilder, REST, Routes, SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js')
 
 const TOKEN = process.env.TOKEN
 const CLIENT_ID = process.env.CLIENT_ID
@@ -61,8 +61,8 @@ async function registerCommands() {
       .setDescription('Créer un nouveau match de pronos (admin)')
       .addStringOption(o => o.setName('titre').setDescription('Ex: France vs Belgique').setRequired(true))
       .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
-      .addStringOption(o => o.setName('date').setDescription('Date et heure du match (ex: Lundi 28 oct à 20h45)').setRequired(true))
-      .addStringOption(o => o.setName('cloture').setDescription('Date/heure de clôture des pronos (ex: 28 oct à 20h30)').setRequired(true))
+      .addStringOption(o => o.setName('date').setDescription('Date et heure du match').setRequired(true))
+      .addStringOption(o => o.setName('cloture').setDescription('Date/heure de clôture des pronos').setRequired(true))
       .addStringOption(o => o.setName('buteurs').setDescription('Buteurs possibles séparés par des virgules').setRequired(true))
       .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
 
@@ -113,7 +113,6 @@ function buildMatchEmbed(match) {
     .setFooter({ text: `ID : ${match.id}` })
 
   if (match.image) embed.setImage(match.image)
-
   return embed
 }
 
@@ -204,81 +203,148 @@ client.on('interactionCreate', async interaction => {
     await interaction.editReply({ content: `✅ Pronos fermés pour **${match.titre}**` })
   }
 
-  // BOUTON PRONO
+  // BOUTON PRONO — étape 1 : sélection résultat
   if (interaction.isButton() && interaction.customId.startsWith('prono_')) {
     const matchId = interaction.customId.replace('prono_', '')
     const match = matches.get(matchId)
     if (!match || match.statut !== 'ouvert') return interaction.reply({ content: '❌ Les pronos sont fermés.', ephemeral: true })
 
-    const buteursOptions = match.buteurs.join('\n')
+    const selectResultat = new StringSelectMenuBuilder()
+      .setCustomId(`select_resultat_${matchId}`)
+      .setPlaceholder('Choisis le résultat du match')
+      .addOptions([
+        { label: 'Victoire France', value: 'victoire_france', emoji: '✅' },
+        { label: 'Match Nul', value: 'nul', emoji: '🤝' },
+        { label: `Victoire ${match.adversaire}`, value: 'defaite_france', emoji: '❌' }
+      ])
+
+    await interaction.reply({
+      content: '**Étape 1/3** — Choisis le résultat du match :',
+      components: [new ActionRowBuilder().addComponents(selectResultat)],
+      ephemeral: true
+    })
+  }
+
+  // SELECT RÉSULTAT — étape 2 : sélection buteur
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_resultat_')) {
+    const matchId = interaction.customId.replace('select_resultat_', '')
+    const match = matches.get(matchId)
+    const resultat = interaction.values[0]
+
+    const matchPronos = pronos.get(matchId) || {}
+    if (!matchPronos[interaction.user.id]) matchPronos[interaction.user.id] = {}
+    matchPronos[interaction.user.id].resultat = resultat
+    matchPronos[interaction.user.id].username = interaction.user.username
+    pronos.set(matchId, matchPronos)
+    await saveData()
+
+    const selectButeur = new StringSelectMenuBuilder()
+      .setCustomId(`select_buteur_${matchId}`)
+      .setPlaceholder('Choisis un buteur français')
+      .addOptions([
+        ...match.buteurs.map(j => ({ label: j, value: j })),
+        { label: 'Aucun buteur français', value: 'aucun' }
+      ])
+
+    await interaction.update({
+      content: '**Étape 2/3** — Choisis ton buteur français :',
+      components: [new ActionRowBuilder().addComponents(selectButeur)]
+    })
+  }
+
+  // SELECT BUTEUR — étape 3 : score exact
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_buteur_')) {
+    const matchId = interaction.customId.replace('select_buteur_', '')
+    const buteur = interaction.values[0]
+
+    const matchPronos = pronos.get(matchId) || {}
+    if (!matchPronos[interaction.user.id]) matchPronos[interaction.user.id] = {}
+    matchPronos[interaction.user.id].buteur = buteur === 'aucun' ? null : buteur
+    matchPronos[interaction.user.id].username = interaction.user.username
+    pronos.set(matchId, matchPronos)
+    await saveData()
+
+    const rowScore = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`score_${matchId}`)
+        .setLabel('Entrer mon score exact')
+        .setStyle(ButtonStyle.Success)
+    )
+
+    const rowSkip = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`skip_score_${matchId}`)
+        .setLabel('Passer le score')
+        .setStyle(ButtonStyle.Secondary)
+    )
+
+    await interaction.update({
+      content: '**Étape 3/3** — Entre ton score exact pour gagner +15 pts bonus :',
+      components: [rowScore, rowSkip]
+    })
+  }
+
+  // BOUTON SCORE
+  if (interaction.isButton() && interaction.customId.startsWith('score_')) {
+    const matchId = interaction.customId.replace('score_', '')
 
     const modal = new ModalBuilder()
-      .setCustomId(`modal_prono_${matchId}`)
-      .setTitle(`Pronostic — ${match.titre}`)
+      .setCustomId(`modal_score_${matchId}`)
+      .setTitle('Score exact')
 
     modal.addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
-          .setCustomId('resultat')
-          .setLabel('Résultat (France / Nul / Adversaire)')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setPlaceholder('Ex: France')
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
           .setCustomId('score')
-          .setLabel('Score exact')
+          .setLabel('Score exact (ex: 2-1 pour la France)')
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setPlaceholder('Ex: 2-1')
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId('buteur')
-          .setLabel('Buteur français')
-          .setStyle(TextInputStyle.Short)
-          .setRequired(false)
-          .setPlaceholder(match.buteurs.slice(0, 3).join(', ') + '...')
       )
     )
 
     return interaction.showModal(modal)
   }
 
-  // MODAL PRONO
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_prono_')) {
+  // BOUTON PASSER SCORE
+  if (interaction.isButton() && interaction.customId.startsWith('skip_score_')) {
+    const matchId = interaction.customId.replace('skip_score_', '')
+    const prono = pronos.get(matchId)?.[interaction.user.id]
+
+    const resultatLabels = { victoire_france: 'Victoire France', nul: 'Match Nul', defaite_france: 'Victoire adversaire' }
+
+    await interaction.update({
+      content:
+        `✅ **Pronostic enregistré !**\n\n` +
+        `Résultat : **${resultatLabels[prono?.resultat] || 'non renseigné'}**\n` +
+        `Score : **non renseigné**\n` +
+        `Buteur : **${prono?.buteur || 'aucun'}**`,
+      components: []
+    })
+  }
+
+  // MODAL SCORE
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_score_')) {
     await interaction.deferReply({ ephemeral: true })
 
-    const matchId = interaction.customId.replace('modal_prono_', '')
-    const match = matches.get(matchId)
-    if (!match || match.statut !== 'ouvert') return interaction.editReply({ content: '❌ Les pronos sont fermés.' })
-
-    const resultat = interaction.fields.getTextInputValue('resultat').trim().toLowerCase()
+    const matchId = interaction.customId.replace('modal_score_', '')
     const score = interaction.fields.getTextInputValue('score').trim()
-    const buteur = interaction.fields.getTextInputValue('buteur').trim()
-
-    let resultatKey = null
-    if (resultat === 'france') resultatKey = 'victoire_france'
-    else if (resultat === 'nul') resultatKey = 'nul'
-    else resultatKey = 'defaite_france'
 
     const matchPronos = pronos.get(matchId) || {}
-    matchPronos[interaction.user.id] = {
-      username: interaction.user.username,
-      resultat: resultatKey,
-      score,
-      buteur: buteur || null
-    }
+    if (!matchPronos[interaction.user.id]) matchPronos[interaction.user.id] = {}
+    matchPronos[interaction.user.id].score = score
     pronos.set(matchId, matchPronos)
     await saveData()
+
+    const prono = matchPronos[interaction.user.id]
+    const resultatLabels = { victoire_france: 'Victoire France', nul: 'Match Nul', defaite_france: 'Victoire adversaire' }
 
     await interaction.editReply({
       content:
         `✅ **Pronostic enregistré !**\n\n` +
-        `Résultat : **${resultat}**\n` +
+        `Résultat : **${resultatLabels[prono?.resultat] || 'non renseigné'}**\n` +
         `Score : **${score}**\n` +
-        (buteur ? `Buteur : **${buteur}**` : '')
+        `Buteur : **${prono?.buteur || 'aucun'}**`
     })
   }
 
@@ -293,7 +359,7 @@ client.on('interactionCreate', async interaction => {
     const resultat = interaction.options.getString('resultat')
     const score = interaction.options.getString('score')
     const buteursStr = interaction.options.getString('buteurs') || ''
-    const buteurs = buteursStr.split(',').map(b => b.trim()).filter(Boolean)
+    const buteurs = buteursStr.split(',').map(b => b.trim().toLowerCase()).filter(Boolean)
 
     const match = matches.get(matchId)
     if (!match) return interaction.editReply({ content: '❌ Match introuvable.' })
@@ -308,7 +374,7 @@ client.on('interactionCreate', async interaction => {
       let pts = 0
       if (prono.resultat === resultat) pts += 5
       if (prono.score === score) pts += 15
-      if (prono.buteur && buteurs.map(b => b.toLowerCase()).includes(prono.buteur.toLowerCase())) pts += 10
+      if (prono.buteur && buteurs.includes(prono.buteur.toLowerCase())) pts += 10
 
       if (pts > 0) {
         const current = scores.get(userId) || { username: prono.username, total: 0 }
@@ -369,7 +435,7 @@ client.on('interactionCreate', async interaction => {
         `**${match.titre}** (${match.statut})\n` +
         `Résultat : ${resultatLabel[p.resultat] || 'non renseigné'}\n` +
         `Score : ${p.score || 'non renseigné'}\n` +
-        `Buteur : ${p.buteur || 'non renseigné'}`
+        `Buteur : ${p.buteur || 'aucun'}`
       )
     }
 
