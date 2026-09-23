@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, EmbedBuilder, REST, Routes, SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js')
+const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, REST, Routes, SlashCommandBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js')
 
 const TOKEN = process.env.TOKEN
 const CLIENT_ID = process.env.CLIENT_ID
@@ -63,14 +63,19 @@ async function registerCommands() {
       .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
       .addStringOption(o => o.setName('date').setDescription('Date et heure du match (ex: Lundi 28 oct à 20h45)').setRequired(true))
       .addStringOption(o => o.setName('cloture').setDescription('Date/heure de clôture des pronos (ex: 28 oct à 20h30)').setRequired(true))
-      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs possibles séparés par des virgules (ex: Mbappé, Dembélé, Griezmann)').setRequired(true))
+      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs possibles séparés par des virgules').setRequired(true))
       .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('fermer-match')
+      .setDescription('Fermer les pronos d\'un match (admin)')
+      .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true)),
 
     new SlashCommandBuilder()
       .setName('resultat')
       .setDescription('Entrer le résultat d\'un match et distribuer les points (admin)')
       .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true))
-      .addStringOption(o => o.setName('resultat').setDescription('Résultat: victoire_france / nul / defaite_france').setRequired(true))
+      .addStringOption(o => o.setName('resultat').setDescription('victoire_france / nul / defaite_france').setRequired(true))
       .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true))
       .addStringOption(o => o.setName('buteurs').setDescription('Buteurs français ayant marqué séparés par des virgules').setRequired(false)),
 
@@ -84,7 +89,7 @@ async function registerCommands() {
 
     new SlashCommandBuilder()
       .setName('listmatchs')
-      .setDescription('Voir tous les matchs actifs (admin)'),
+      .setDescription('Voir tous les matchs (admin)'),
   ].map(c => c.toJSON())
 
   const rest = new REST({ version: '10' }).setToken(TOKEN)
@@ -94,37 +99,41 @@ async function registerCommands() {
 
 function buildMatchEmbed(match) {
   const embed = new EmbedBuilder()
-    .setTitle(`🇫🇷 ${match.titre}`)
+    .setTitle(`${match.titre}`)
     .setDescription(
       `📅 **${match.date}**\n\n` +
-      `**Fais tes pronos avant la clôture et tente de grimper dans le classement !**\n\n` +
+      `Fais ton pronostic avant la clôture et tente de grimper dans le classement !\n\n` +
       `**Système de points :**\n` +
       `✅ Bon résultat **5 pts**\n` +
       `🎯 Score exact **+15 pts bonus**\n` +
       `⚽ Bon buteur **+10 pts bonus**\n\n` +
-      `⏰ Clôture des pronos : **${match.cloture}**`
+      `⏰ Clôture : **${match.cloture}**`
     )
     .setColor('#0055A4')
-    .setFooter({ text: `ID du match : ${match.id}` })
+    .setFooter({ text: `ID : ${match.id}` })
 
   if (match.image) embed.setImage(match.image)
 
   return embed
 }
 
-function buildPronoRows(matchId, adversaire) {
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`prono_victoire_${matchId}`).setLabel('🇫🇷 Victoire France').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`prono_nul_${matchId}`).setLabel('🤝 Match Nul').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`prono_defaite_${matchId}`).setLabel(`🏴 Victoire ${adversaire}`).setStyle(ButtonStyle.Danger)
+function buildPronoButton(matchId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`prono_${matchId}`)
+      .setLabel('Faire mon pronostic')
+      .setStyle(ButtonStyle.Primary)
   )
+}
 
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`score_${matchId}`).setLabel('🎯 Entrer mon score exact').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`buteur_${matchId}`).setLabel('⚽ Choisir mon buteur').setStyle(ButtonStyle.Success)
+function buildClosedButton() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('closed')
+      .setLabel('Pronos fermés')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true)
   )
-
-  return [row1, row2]
 }
 
 client.on('ready', async () => {
@@ -159,7 +168,7 @@ client.on('interactionCreate', async interaction => {
     const channel = await client.channels.fetch(PRONO_CHANNEL_ID)
     const msg = await channel.send({
       embeds: [buildMatchEmbed(match)],
-      components: buildPronoRows(matchId, adversaire)
+      components: [buildPronoButton(matchId)]
     })
 
     match.messageId = msg.id
@@ -169,90 +178,108 @@ client.on('interactionCreate', async interaction => {
     await interaction.editReply({ content: `✅ Match créé ! ID : \`${matchId}\`` })
   }
 
-  // BOUTONS
-  if (interaction.isButton()) {
-    const customId = interaction.customId
+  // FERMER UN MATCH
+  if (interaction.isChatInputCommand() && interaction.commandName === 'fermer-match') {
+    const isAdmin = interaction.member.permissions.has('Administrator')
+    if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
 
-    if (customId.startsWith('prono_victoire_') || customId.startsWith('prono_nul_') || customId.startsWith('prono_defaite_')) {
-      const parts = customId.split('_')
-      const matchId = parts.slice(2).join('_')
-      const choix = parts[1]
-
-      const match = matches.get(matchId)
-      if (!match || match.statut !== 'ouvert') return interaction.reply({ content: '❌ Les pronos sont fermés pour ce match.', ephemeral: true })
-
-      const matchPronos = pronos.get(matchId) || {}
-      if (!matchPronos[interaction.user.id]) matchPronos[interaction.user.id] = {}
-      matchPronos[interaction.user.id].resultat = choix
-      matchPronos[interaction.user.id].username = interaction.user.username
-      pronos.set(matchId, matchPronos)
-      await saveData()
-
-      const labels = { victoire: '🇫🇷 Victoire France', nul: '🤝 Match Nul', defaite: `🏴 Victoire ${match.adversaire}` }
-      await interaction.reply({ content: `✅ Pronostic enregistré : **${labels[choix]}**\n\nN'oublie pas d'entrer ton score exact et ton buteur pour gagner plus de points !`, ephemeral: true })
-    }
-
-    if (customId.startsWith('score_')) {
-      const matchId = customId.replace('score_', '')
-      const match = matches.get(matchId)
-      if (!match || match.statut !== 'ouvert') return interaction.reply({ content: '❌ Les pronos sont fermés.', ephemeral: true })
-
-      const modal = new ModalBuilder().setCustomId(`modal_score_${matchId}`).setTitle('🎯 Score exact')
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId('score').setLabel('Score exact (ex: 2-1 pour la France)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Ex: 2-1')
-        )
-      )
-      return interaction.showModal(modal)
-    }
-
-    if (customId.startsWith('buteur_')) {
-      const matchId = customId.replace('buteur_', '')
-      const match = matches.get(matchId)
-      if (!match || match.statut !== 'ouvert') return interaction.reply({ content: '❌ Les pronos sont fermés.', ephemeral: true })
-
-      const select = new StringSelectMenuBuilder()
-        .setCustomId(`select_buteur_${matchId}`)
-        .setPlaceholder('Choisis un buteur français')
-        .addOptions(match.buteurs.map(j => ({ label: j, value: j })))
-
-      await interaction.reply({
-        content: '⚽ Choisis ton buteur français :',
-        components: [new ActionRowBuilder().addComponents(select)],
-        ephemeral: true
-      })
-    }
-  }
-
-  // SELECT BUTEUR
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_buteur_')) {
-    const matchId = interaction.customId.replace('select_buteur_', '')
-    const buteur = interaction.values[0]
-
-    const matchPronos = pronos.get(matchId) || {}
-    if (!matchPronos[interaction.user.id]) matchPronos[interaction.user.id] = {}
-    matchPronos[interaction.user.id].buteur = buteur
-    matchPronos[interaction.user.id].username = interaction.user.username
-    pronos.set(matchId, matchPronos)
-    await saveData()
-
-    await interaction.update({ content: `✅ Buteur enregistré : **${buteur}**`, components: [] })
-  }
-
-  // MODAL SCORE
-  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_score_')) {
     await interaction.deferReply({ ephemeral: true })
-    const matchId = interaction.customId.replace('modal_score_', '')
+
+    const matchId = interaction.options.getString('id')
+    const match = matches.get(matchId)
+    if (!match) return interaction.editReply({ content: '❌ Match introuvable.' })
+
+    match.statut = 'fermé'
+    matches.set(matchId, match)
+    await saveData()
+
+    try {
+      const channel = await client.channels.fetch(PRONO_CHANNEL_ID)
+      const msg = await channel.messages.fetch(match.messageId)
+      await msg.edit({ components: [buildClosedButton()] })
+    } catch (e) {
+      console.error('Impossible de modifier le message:', e.message)
+    }
+
+    await interaction.editReply({ content: `✅ Pronos fermés pour **${match.titre}**` })
+  }
+
+  // BOUTON PRONO
+  if (interaction.isButton() && interaction.customId.startsWith('prono_')) {
+    const matchId = interaction.customId.replace('prono_', '')
+    const match = matches.get(matchId)
+    if (!match || match.statut !== 'ouvert') return interaction.reply({ content: '❌ Les pronos sont fermés.', ephemeral: true })
+
+    const buteursOptions = match.buteurs.join('\n')
+
+    const modal = new ModalBuilder()
+      .setCustomId(`modal_prono_${matchId}`)
+      .setTitle(`Pronostic — ${match.titre}`)
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('resultat')
+          .setLabel('Résultat (France / Nul / Adversaire)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder('Ex: France')
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('score')
+          .setLabel('Score exact')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder('Ex: 2-1')
+      ),
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('buteur')
+          .setLabel('Buteur français')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setPlaceholder(match.buteurs.slice(0, 3).join(', ') + '...')
+      )
+    )
+
+    return interaction.showModal(modal)
+  }
+
+  // MODAL PRONO
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_prono_')) {
+    await interaction.deferReply({ ephemeral: true })
+
+    const matchId = interaction.customId.replace('modal_prono_', '')
+    const match = matches.get(matchId)
+    if (!match || match.statut !== 'ouvert') return interaction.editReply({ content: '❌ Les pronos sont fermés.' })
+
+    const resultat = interaction.fields.getTextInputValue('resultat').trim().toLowerCase()
     const score = interaction.fields.getTextInputValue('score').trim()
+    const buteur = interaction.fields.getTextInputValue('buteur').trim()
+
+    let resultatKey = null
+    if (resultat === 'france') resultatKey = 'victoire_france'
+    else if (resultat === 'nul') resultatKey = 'nul'
+    else resultatKey = 'defaite_france'
 
     const matchPronos = pronos.get(matchId) || {}
-    if (!matchPronos[interaction.user.id]) matchPronos[interaction.user.id] = {}
-    matchPronos[interaction.user.id].score = score
-    matchPronos[interaction.user.id].username = interaction.user.username
+    matchPronos[interaction.user.id] = {
+      username: interaction.user.username,
+      resultat: resultatKey,
+      score,
+      buteur: buteur || null
+    }
     pronos.set(matchId, matchPronos)
     await saveData()
 
-    await interaction.editReply({ content: `✅ Score exact enregistré : **${score}**` })
+    await interaction.editReply({
+      content:
+        `✅ **Pronostic enregistré !**\n\n` +
+        `Résultat : **${resultat}**\n` +
+        `Score : **${score}**\n` +
+        (buteur ? `Buteur : **${buteur}**` : '')
+    })
   }
 
   // COMMANDE RÉSULTAT
@@ -281,7 +308,7 @@ client.on('interactionCreate', async interaction => {
       let pts = 0
       if (prono.resultat === resultat) pts += 5
       if (prono.score === score) pts += 15
-      if (prono.buteur && buteurs.includes(prono.buteur)) pts += 10
+      if (prono.buteur && buteurs.map(b => b.toLowerCase()).includes(prono.buteur.toLowerCase())) pts += 10
 
       if (pts > 0) {
         const current = scores.get(userId) || { username: prono.username, total: 0 }
@@ -295,9 +322,9 @@ client.on('interactionCreate', async interaction => {
     await saveData()
 
     const resultatLabels = {
-      victoire_france: '🇫🇷 Victoire France',
-      nul: '🤝 Match Nul',
-      defaite_france: `🏴 Victoire ${match.adversaire}`
+      victoire_france: 'Victoire France',
+      nul: 'Match Nul',
+      defaite_france: `Victoire ${match.adversaire}`
     }
 
     const staffChannel = await client.channels.fetch(STAFF_CHANNEL_ID)
@@ -310,7 +337,7 @@ client.on('interactionCreate', async interaction => {
           `**Résultat :** ${resultatLabels[resultat]}\n` +
           `**Score :** ${score}\n` +
           `**Buteurs :** ${buteurs.join(', ') || 'Aucun'}\n\n` +
-          `**Top gagnants de ce match :**\n${gainsList || 'Aucun'}`
+          `**Top gagnants :**\n${gainsList || 'Aucun'}`
         )
         .setColor('#00C853')]
     })
@@ -337,9 +364,10 @@ client.on('interactionCreate', async interaction => {
       const match = matches.get(matchId)
       if (!match || !matchPronos[userId]) continue
       const p = matchPronos[userId]
+      const resultatLabel = { victoire_france: 'Victoire France', nul: 'Match Nul', defaite_france: `Victoire ${match.adversaire}` }
       mesPronos.push(
         `**${match.titre}** (${match.statut})\n` +
-        `Résultat : ${p.resultat || 'non renseigné'}\n` +
+        `Résultat : ${resultatLabel[p.resultat] || 'non renseigné'}\n` +
         `Score : ${p.score || 'non renseigné'}\n` +
         `Buteur : ${p.buteur || 'non renseigné'}`
       )
