@@ -16,12 +16,6 @@ const pronos = new Map()
 const scores = new Map()
 let saveMessageId = null
 
-const JOUEURS_FRANCE = [
-  'Mbappé', 'Dembélé', 'Giroud', 'Griezmann', 'Thuram',
-  'Camavinga', 'Tchouaméni', 'Rabiot', 'Kanté',
-  'Saliba', 'Upamecano', 'Hernandez', 'Pavard'
-]
-
 async function saveData() {
   try {
     const channel = await client.channels.fetch(STAFF_CHANNEL_ID)
@@ -69,6 +63,7 @@ async function registerCommands() {
       .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
       .addStringOption(o => o.setName('date').setDescription('Date et heure du match (ex: Lundi 28 oct à 20h45)').setRequired(true))
       .addStringOption(o => o.setName('cloture').setDescription('Date/heure de clôture des pronos (ex: 28 oct à 20h30)').setRequired(true))
+      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs possibles séparés par des virgules (ex: Mbappé, Dembélé, Griezmann)').setRequired(true))
       .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
 
     new SlashCommandBuilder()
@@ -77,7 +72,7 @@ async function registerCommands() {
       .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true))
       .addStringOption(o => o.setName('resultat').setDescription('Résultat: victoire_france / nul / defaite_france').setRequired(true))
       .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true))
-      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs français séparés par des virgules').setRequired(false)),
+      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs français ayant marqué séparés par des virgules').setRequired(false)),
 
     new SlashCommandBuilder()
       .setName('classement')
@@ -110,7 +105,7 @@ function buildMatchEmbed(match) {
       `⏰ Clôture des pronos : **${match.cloture}**`
     )
     .setColor('#0055A4')
-    .setFooter({ text: `ID du match : ${match.id} • Nutrimuscle x Ligue des Nations` })
+    .setFooter({ text: `ID du match : ${match.id}` })
 
   if (match.image) embed.setImage(match.image)
 
@@ -152,9 +147,10 @@ client.on('interactionCreate', async interaction => {
     const date = interaction.options.getString('date')
     const cloture = interaction.options.getString('cloture')
     const image = interaction.options.getString('image')
+    const buteursMatch = interaction.options.getString('buteurs').split(',').map(b => b.trim()).filter(Boolean)
 
     const matchId = `MATCH_${Date.now()}`
-    const match = { id: matchId, titre, adversaire, date, cloture, image, statut: 'ouvert', messageId: null }
+    const match = { id: matchId, titre, adversaire, date, cloture, image, buteurs: buteursMatch, statut: 'ouvert', messageId: null }
 
     matches.set(matchId, match)
     pronos.set(matchId, {})
@@ -173,7 +169,7 @@ client.on('interactionCreate', async interaction => {
     await interaction.editReply({ content: `✅ Match créé ! ID : \`${matchId}\`` })
   }
 
-  // BOUTONS RÉSULTAT
+  // BOUTONS
   if (interaction.isButton()) {
     const customId = interaction.customId
 
@@ -218,7 +214,7 @@ client.on('interactionCreate', async interaction => {
       const select = new StringSelectMenuBuilder()
         .setCustomId(`select_buteur_${matchId}`)
         .setPlaceholder('Choisis un buteur français')
-        .addOptions(JOUEURS_FRANCE.map(j => ({ label: j, value: j })))
+        .addOptions(match.buteurs.map(j => ({ label: j, value: j })))
 
       await interaction.reply({
         content: '⚽ Choisis ton buteur français :',
@@ -343,9 +339,9 @@ client.on('interactionCreate', async interaction => {
       const p = matchPronos[userId]
       mesPronos.push(
         `**${match.titre}** (${match.statut})\n` +
-        `→ Résultat : ${p.resultat || 'non renseigné'}\n` +
-        `→ Score : ${p.score || 'non renseigné'}\n` +
-        `→ Buteur : ${p.buteur || 'non renseigné'}`
+        `Résultat : ${p.resultat || 'non renseigné'}\n` +
+        `Score : ${p.score || 'non renseigné'}\n` +
+        `Buteur : ${p.buteur || 'non renseigné'}`
       )
     }
 
@@ -379,7 +375,7 @@ async function buildClassementEmbed() {
   }).join('\n')
 
   return new EmbedBuilder()
-    .setTitle('🏆 Classement Général Nutrimuscle x Ligue des Nations')
+    .setTitle('🏆 Classement Général')
     .setDescription(desc || 'Aucun point pour l\'instant.')
     .setColor('#0055A4')
     .setFooter({ text: 'Classement mis à jour après chaque match' })
