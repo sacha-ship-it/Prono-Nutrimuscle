@@ -48,9 +48,42 @@ async function loadData() {
       if (parsed.scores) Object.entries(parsed.scores).forEach(([k, v]) => scores.set(k, v))
       saveMessageId = dataMsg.id
       console.log(`${matches.size} matchs chargés`)
+
+      // Relancer les timers pour les matchs encore ouverts
+      for (const [matchId, match] of matches.entries()) {
+        if (match.statut === 'ouvert' && match.cloture) {
+          scheduleAutoClose(matchId, match.cloture)
+        }
+      }
     }
   } catch (e) {
     console.log('Pas de données existantes')
+  }
+}
+
+function scheduleAutoClose(matchId, cloture) {
+  const closingDate = new Date(cloture)
+  const now = new Date()
+  const delay = closingDate - now
+
+  if (delay > 0) {
+    setTimeout(async () => {
+      const match = matches.get(matchId)
+      if (match && match.statut === 'ouvert') {
+        match.statut = 'fermé'
+        matches.set(matchId, match)
+        await saveData()
+        try {
+          const ch = await client.channels.fetch(PRONO_CHANNEL_ID)
+          const message = await ch.messages.fetch(match.messageId)
+          await message.edit({ components: [buildClosedButton()] })
+          console.log(`Match ${matchId} fermé automatiquement`)
+        } catch (e) {
+          console.error('Erreur fermeture auto:', e.message)
+        }
+      }
+    }, delay)
+    console.log(`Timer de fermeture pour ${matchId} dans ${Math.round(delay / 60000)} minutes`)
   }
 }
 
@@ -62,13 +95,13 @@ async function registerCommands() {
       .addStringOption(o => o.setName('titre').setDescription('Ex: France vs Belgique').setRequired(true))
       .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
       .addStringOption(o => o.setName('date').setDescription('Date et heure du match').setRequired(true))
-      .addStringOption(o => o.setName('cloture').setDescription('Date/heure de clôture des pronos').setRequired(true))
+      .addStringOption(o => o.setName('cloture').setDescription('Clôture format: 2026-09-28 20:00').setRequired(true))
       .addStringOption(o => o.setName('buteurs').setDescription('Buteurs potentiels des 2 équipes séparés par des virgules').setRequired(true))
       .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
 
     new SlashCommandBuilder()
       .setName('fermer-match')
-      .setDescription('Fermer les pronos d\'un match (admin)')
+      .setDescription('Fermer les pronos d\'un match manuellement (admin)')
       .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true)),
 
     new SlashCommandBuilder()
@@ -77,7 +110,7 @@ async function registerCommands() {
       .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true))
       .addStringOption(o => o.setName('resultat').setDescription('victoire_france / nul / defaite_france').setRequired(true))
       .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true))
-      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs ayant marqué séparés par des virgules').setRequired(false)),
+      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs ayant marqué séparés par des virgules, ou "aucun"').setRequired(true)),
 
     new SlashCommandBuilder()
       .setName('classement')
@@ -97,6 +130,11 @@ async function registerCommands() {
   console.log('Commandes enregistrées')
 }
 
+function formatDate(dateStr) {
+  const date = new Date(dateStr)
+  return date.toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
 function buildMatchEmbed(match) {
   const embed = new EmbedBuilder()
     .setTitle(`${match.titre}`)
@@ -107,7 +145,7 @@ function buildMatchEmbed(match) {
       `✅ Bon résultat **5 pts**\n` +
       `🎯 Score exact **+15 pts bonus**\n` +
       `⚽ Bon buteur **+10 pts bonus**\n\n` +
-      `⏰ Clôture : **${match.cloture}**`
+      `⏰ Clôture : **${formatDate(match.cloture)}**`
     )
     .setColor('#0055A4')
     .setFooter({ text: `ID : ${match.id}` })
@@ -157,6 +195,11 @@ client.on('interactionCreate', async interaction => {
     const image = interaction.options.getString('image')
     const buteursMatch = interaction.options.getString('buteurs').split(',').map(b => b.trim()).filter(Boolean)
 
+    const closingDate = new Date(cloture)
+    if (isNaN(closingDate.getTime())) {
+      return interaction.editReply({ content: '❌ Format de date invalide. Utilise le format : 2026-09-28 20:00' })
+    }
+
     const matchId = `MATCH_${Date.now()}`
     const match = { id: matchId, titre, adversaire, date, cloture, image, buteurs: buteursMatch, statut: 'ouvert', messageId: null }
 
@@ -174,10 +217,12 @@ client.on('interactionCreate', async interaction => {
     matches.set(matchId, match)
     await saveData()
 
-    await interaction.editReply({ content: `✅ Match créé ! ID : \`${matchId}\`` })
+    scheduleAutoClose(matchId, cloture)
+
+    await interaction.editReply({ content: `✅ Match créé ! ID : \`${matchId}\`\nFermeture automatique le **${formatDate(cloture)}**` })
   }
 
-  // FERMER UN MATCH
+  // FERMER UN MATCH MANUELLEMENT
   if (interaction.isChatInputCommand() && interaction.commandName === 'fermer-match') {
     const isAdmin = interaction.member.permissions.has('Administrator')
     if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
@@ -243,7 +288,7 @@ client.on('interactionCreate', async interaction => {
       .setPlaceholder('Choisis un buteur')
       .addOptions([
         ...match.buteurs.map(j => ({ label: j, value: j })),
-        { label: 'Aucun buteur', value: 'aucun' }
+        { label: 'Aucun buteur', value: 'aucun', emoji: '🚫' }
       ])
 
     await interaction.update({
@@ -358,7 +403,7 @@ client.on('interactionCreate', async interaction => {
     const resultat = interaction.options.getString('resultat')
     const score = interaction.options.getString('score')
     const buteursStr = interaction.options.getString('buteurs') || ''
-    const buteurs = buteursStr.split(',').map(b => b.trim().toLowerCase()).filter(Boolean)
+    const buteurs = buteursStr === 'aucun' ? [] : buteursStr.split(',').map(b => b.trim().toLowerCase()).filter(Boolean)
 
     const match = matches.get(matchId)
     if (!match) return interaction.editReply({ content: '❌ Match introuvable.' })
@@ -373,7 +418,8 @@ client.on('interactionCreate', async interaction => {
       let pts = 0
       if (prono.resultat === resultat) pts += 5
       if (prono.score === score) pts += 15
-      if (prono.buteur && buteurs.includes(prono.buteur.toLowerCase())) pts += 10
+      if (buteurs.length > 0 && prono.buteur && buteurs.includes(prono.buteur.toLowerCase())) pts += 10
+      if (buteurs.length === 0 && prono.buteur === null) pts += 10
 
       if (pts > 0) {
         const current = scores.get(userId) || { username: prono.username, total: 0 }
@@ -401,7 +447,7 @@ client.on('interactionCreate', async interaction => {
         .setDescription(
           `**Résultat :** ${resultatLabels[resultat]}\n` +
           `**Score :** ${score}\n` +
-          `**Buteurs :** ${buteurs.join(', ') || 'Aucun'}\n\n` +
+          `**Buteurs :** ${buteurs.length > 0 ? buteurs.join(', ') : 'Aucun'}\n\n` +
           `**Top gagnants :**\n${gainsList || 'Aucun'}`
         )
         .setColor('#00C853')]
@@ -454,7 +500,7 @@ client.on('interactionCreate', async interaction => {
     const isAdmin = interaction.member.permissions.has('Administrator')
     if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
 
-    const list = [...matches.values()].map(m => `**${m.titre}** ${m.statut} ID: \`${m.id}\``).join('\n')
+    const list = [...matches.values()].map(m => `**${m.titre}** ${m.statut} ID: \`${m.id}\` Clôture: ${formatDate(m.cloture)}`).join('\n')
     await interaction.reply({ content: list || 'Aucun match.', ephemeral: true })
   }
 })
