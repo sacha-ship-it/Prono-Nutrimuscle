@@ -51,7 +51,6 @@ async function loadData() {
       if (parsed.classementMessageId) classementMessageId = parsed.classementMessageId
       saveMessageId = dataMsg.id
 
-      // Relancer les timers pour les matchs encore ouverts
       for (const [matchId, match] of matches.entries()) {
         if (match.statut === 'ouvert' && match.cloture) {
           scheduleAutoClose(matchId, match.cloture)
@@ -90,80 +89,29 @@ function scheduleAutoClose(matchId, cloture) {
   }
 }
 
-async function registerCommands() {
-  const commands = [
-    new SlashCommandBuilder()
-      .setName('creer-match')
-      .setDescription('Créer un nouveau match de pronos (admin)')
-      .addStringOption(o => o.setName('titre').setDescription('Ex: France vs Belgique').setRequired(true))
-      .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
-      .addStringOption(o => o.setName('date').setDescription('Date et heure du match').setRequired(true))
-      .addStringOption(o => o.setName('cloture').setDescription('Clôture format: 2026-09-28 20:00 (heure Paris)').setRequired(true))
-      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs potentiels des 2 équipes séparés par des virgules').setRequired(true))
-      .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
-
-    new SlashCommandBuilder()
-      .setName('fermer-match')
-      .setDescription('Fermer les pronos d\'un match manuellement (admin)')
-      .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName('resultat')
-      .setDescription('Entrer le résultat d\'un match (admin)')
-      .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true))
-      .addStringOption(o => o.setName('resultat').setDescription('victoire_france / nul / defaite_france').setRequired(true))
-      .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName('publier-classement')
-      .setDescription('Publier le classement dans le canal dédié (admin)'),
-
-    new SlashCommandBuilder()
-      .setName('reset-classement')
-      .setDescription('Remettre le classement à zéro (admin)'),
-
-    new SlashCommandBuilder()
-      .setName('monprono')
-      .setDescription('Voir mes pronos en cours'),
-
-    new SlashCommandBuilder()
-      .setName('listmatchs')
-      .setDescription('Voir tous les matchs (admin)'),
-  ].map(c => c.toJSON())
-
-  const rest = new REST({ version: '10' }).setToken(TOKEN)
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands })
-  console.log('Commandes enregistrées')
-}
-
 function parseDateParis(dateStr) {
-  // Format attendu: "2026-09-28 20:00"
   const [datePart, timePart] = dateStr.trim().split(' ')
   const [year, month, day] = datePart.split('-').map(Number)
   const [hours, minutes] = timePart.split(':').map(Number)
 
-  // Créer la date en heure Paris sans décalage
-  const date = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0))
-  // Soustraire l'offset Paris (UTC+2 en été, UTC+1 en hiver)
-  const parisOffset = getParisTZOffset(date)
-  return new Date(date.getTime() - parisOffset * 60 * 1000)
-}
+  // Créer la date directement en UTC en tenant compte de l'offset Paris
+  // En été (CEST) Paris = UTC+2, en hiver (CET) Paris = UTC+1
+  // On crée d'abord la date en UTC naive puis on ajuste
+  const tempDate = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0))
 
-function getParisTZOffset(date) {
-  // Retourne l'offset en minutes pour l'heure de Paris
-  const parisTime = new Intl.DateTimeFormat('fr-FR', {
+  // Obtenir l'offset réel de Paris pour cette date
+  const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Europe/Paris',
     hour: 'numeric',
     minute: 'numeric',
-    hour12: false
-  }).formatToParts(date)
+    hour12: false,
+    timeZoneName: 'short'
+  })
+  const parts = formatter.formatToParts(tempDate)
+  const tzName = parts.find(p => p.type === 'timeZoneName')?.value || 'GMT+2'
+  const offset = tzName.includes('+2') ? 2 : 1
 
-  const utcHours = date.getUTCHours()
-  const utcMinutes = date.getUTCMinutes()
-  const parisHours = parseInt(parisTime.find(p => p.type === 'hour').value)
-  const parisMinutes = parseInt(parisTime.find(p => p.type === 'minute').value)
-
-  return (parisHours * 60 + parisMinutes) - (utcHours * 60 + utcMinutes)
+  return new Date(Date.UTC(year, month - 1, day, hours - offset, minutes, 0))
 }
 
 function formatDateParis(isoDate) {
@@ -231,6 +179,52 @@ async function buildClassementEmbed() {
     .setColor('#0055A4')
     .setFooter({ text: 'Classement publié manuellement' })
     .setTimestamp()
+}
+
+async function registerCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('creer-match')
+      .setDescription('Créer un nouveau match de pronos (admin)')
+      .addStringOption(o => o.setName('titre').setDescription('Ex: France vs Belgique').setRequired(true))
+      .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
+      .addStringOption(o => o.setName('date').setDescription('Date et heure du match').setRequired(true))
+      .addStringOption(o => o.setName('cloture').setDescription('Clôture format: 2026-09-28 20:00 (heure Paris)').setRequired(true))
+      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs potentiels des 2 équipes séparés par des virgules').setRequired(true))
+      .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('fermer-match')
+      .setDescription('Fermer les pronos d\'un match manuellement (admin)')
+      .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('resultat')
+      .setDescription('Entrer le résultat d\'un match (admin)')
+      .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true))
+      .addStringOption(o => o.setName('resultat').setDescription('victoire_france / nul / defaite_france').setRequired(true))
+      .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('publier-classement')
+      .setDescription('Publier le classement dans le canal dédié (admin)'),
+
+    new SlashCommandBuilder()
+      .setName('reset-classement')
+      .setDescription('Remettre le classement à zéro (admin)'),
+
+    new SlashCommandBuilder()
+      .setName('monprono')
+      .setDescription('Voir mes pronos en cours'),
+
+    new SlashCommandBuilder()
+      .setName('listmatchs')
+      .setDescription('Voir tous les matchs (admin)'),
+  ].map(c => c.toJSON())
+
+  const rest = new REST({ version: '10' }).setToken(TOKEN)
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands })
+  console.log('Commandes enregistrées')
 }
 
 client.on('ready', async () => {
@@ -469,7 +463,7 @@ client.on('interactionCreate', async interaction => {
     })
   }
 
-  // COMMANDE RÉSULTAT — avec sélection des buteurs parmi ceux du match
+  // COMMANDE RÉSULTAT
   if (interaction.isChatInputCommand() && interaction.commandName === 'resultat') {
     if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
 
@@ -482,9 +476,8 @@ client.on('interactionCreate', async interaction => {
     const match = matches.get(matchId)
     if (!match) return interaction.editReply({ content: '❌ Match introuvable.' })
 
-    // Proposer les buteurs du match comme sélection
     const selectButeurs = new StringSelectMenuBuilder()
-      .setCustomId(`resultat_buteurs_${matchId}_${resultat}_${encodeURIComponent(score)}`)
+      .setCustomId(`rb|${matchId}|${resultat}|${encodeURIComponent(score)}`)
       .setPlaceholder('Sélectionne les buteurs ayant marqué')
       .setMinValues(1)
       .setMaxValues(match.buteurs.length + 1)
@@ -500,13 +493,13 @@ client.on('interactionCreate', async interaction => {
   }
 
   // SELECT BUTEURS RÉSULTAT
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('resultat_buteurs_')) {
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('rb|')) {
     await interaction.deferUpdate()
 
-    const parts = interaction.customId.split('_')
-    const matchId = parts[2]
-    const resultat = parts[3]
-    const score = decodeURIComponent(parts[4])
+    const parts = interaction.customId.split('|')
+    const matchId = parts[1]
+    const resultat = parts[2]
+    const score = decodeURIComponent(parts[3])
     const buteurs = interaction.values.includes('aucun') ? [] : interaction.values.map(b => b.toLowerCase())
 
     const match = matches.get(matchId)
@@ -556,13 +549,13 @@ client.on('interactionCreate', async interaction => {
           `**Résultat :** ${resultatLabels[resultat]}\n` +
           `**Score :** ${score}\n` +
           `**Buteurs :** ${buteurs.length > 0 ? buteurs.join(', ') : 'Aucun'}\n\n` +
-          `**Points distribués — Top gagnants :**\n${gainsList || 'Aucun'}\n\n` +
-          `⚠️ Le classement n\'a pas été mis à jour automatiquement. Utilise **/publier-classement** quand tu es prêt.`
+          `**Points distribués :**\n${gainsList || 'Aucun'}\n\n` +
+          `⚠️ Utilise **/publier-classement** quand tu es prêt.`
         )
         .setColor('#00C853')]
     })
 
-    await interaction.followUp({ content: '✅ Résultat enregistré et points distribués ! Utilise **/publier-classement** pour mettre à jour le classement.', ephemeral: true })
+    await interaction.followUp({ content: '✅ Points distribués ! Utilise **/publier-classement** pour mettre à jour le classement.', ephemeral: true })
   }
 
   // PUBLIER CLASSEMENT
