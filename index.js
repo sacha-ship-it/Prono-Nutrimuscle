@@ -15,6 +15,7 @@ const matches = new Map()
 const pronos = new Map()
 const scores = new Map()
 let saveMessageId = null
+let classementMessageId = null
 
 async function saveData() {
   try {
@@ -22,7 +23,8 @@ async function saveData() {
     const content = 'PRONO_DATA:' + JSON.stringify({
       matches: Object.fromEntries(matches),
       pronos: Object.fromEntries(pronos),
-      scores: Object.fromEntries(scores)
+      scores: Object.fromEntries(scores),
+      classementMessageId
     })
     if (saveMessageId) {
       const msg = await channel.messages.fetch(saveMessageId)
@@ -46,8 +48,8 @@ async function loadData() {
       if (parsed.matches) Object.entries(parsed.matches).forEach(([k, v]) => matches.set(k, v))
       if (parsed.pronos) Object.entries(parsed.pronos).forEach(([k, v]) => pronos.set(k, v))
       if (parsed.scores) Object.entries(parsed.scores).forEach(([k, v]) => scores.set(k, v))
+      if (parsed.classementMessageId) classementMessageId = parsed.classementMessageId
       saveMessageId = dataMsg.id
-      console.log(`${matches.size} matchs chargés`)
 
       // Relancer les timers pour les matchs encore ouverts
       for (const [matchId, match] of matches.entries()) {
@@ -55,6 +57,8 @@ async function loadData() {
           scheduleAutoClose(matchId, match.cloture)
         }
       }
+
+      console.log(`${matches.size} matchs chargés`)
     }
   } catch (e) {
     console.log('Pas de données existantes')
@@ -83,7 +87,6 @@ function scheduleAutoClose(matchId, cloture) {
         }
       }
     }, delay)
-    console.log(`Timer de fermeture pour ${matchId} dans ${Math.round(delay / 60000)} minutes`)
   }
 }
 
@@ -95,7 +98,7 @@ async function registerCommands() {
       .addStringOption(o => o.setName('titre').setDescription('Ex: France vs Belgique').setRequired(true))
       .addStringOption(o => o.setName('adversaire').setDescription('Nom de l\'adversaire').setRequired(true))
       .addStringOption(o => o.setName('date').setDescription('Date et heure du match').setRequired(true))
-      .addStringOption(o => o.setName('cloture').setDescription('Clôture format: 2026-09-28 20:00').setRequired(true))
+      .addStringOption(o => o.setName('cloture').setDescription('Clôture format: 2026-09-28 20:00 (heure Paris)').setRequired(true))
       .addStringOption(o => o.setName('buteurs').setDescription('Buteurs potentiels des 2 équipes séparés par des virgules').setRequired(true))
       .addStringOption(o => o.setName('image').setDescription('URL de l\'image du match').setRequired(false)),
 
@@ -106,15 +109,18 @@ async function registerCommands() {
 
     new SlashCommandBuilder()
       .setName('resultat')
-      .setDescription('Entrer le résultat d\'un match et distribuer les points (admin)')
+      .setDescription('Entrer le résultat d\'un match (admin)')
       .addStringOption(o => o.setName('id').setDescription('ID du match').setRequired(true))
       .addStringOption(o => o.setName('resultat').setDescription('victoire_france / nul / defaite_france').setRequired(true))
-      .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true))
-      .addStringOption(o => o.setName('buteurs').setDescription('Buteurs ayant marqué séparés par des virgules, ou "aucun"').setRequired(true)),
+      .addStringOption(o => o.setName('score').setDescription('Score exact (ex: 2-1)').setRequired(true)),
 
     new SlashCommandBuilder()
-      .setName('classement')
-      .setDescription('Afficher le classement général'),
+      .setName('publier-classement')
+      .setDescription('Publier le classement dans le canal dédié (admin)'),
+
+    new SlashCommandBuilder()
+      .setName('reset-classement')
+      .setDescription('Remettre le classement à zéro (admin)'),
 
     new SlashCommandBuilder()
       .setName('monprono')
@@ -130,9 +136,45 @@ async function registerCommands() {
   console.log('Commandes enregistrées')
 }
 
-function formatDate(dateStr) {
-  const date = new Date(dateStr)
-  return date.toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+function parseDateParis(dateStr) {
+  // Format attendu: "2026-09-28 20:00"
+  const [datePart, timePart] = dateStr.trim().split(' ')
+  const [year, month, day] = datePart.split('-').map(Number)
+  const [hours, minutes] = timePart.split(':').map(Number)
+
+  // Créer la date en heure Paris sans décalage
+  const date = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0))
+  // Soustraire l'offset Paris (UTC+2 en été, UTC+1 en hiver)
+  const parisOffset = getParisTZOffset(date)
+  return new Date(date.getTime() - parisOffset * 60 * 1000)
+}
+
+function getParisTZOffset(date) {
+  // Retourne l'offset en minutes pour l'heure de Paris
+  const parisTime = new Intl.DateTimeFormat('fr-FR', {
+    timeZone: 'Europe/Paris',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false
+  }).formatToParts(date)
+
+  const utcHours = date.getUTCHours()
+  const utcMinutes = date.getUTCMinutes()
+  const parisHours = parseInt(parisTime.find(p => p.type === 'hour').value)
+  const parisMinutes = parseInt(parisTime.find(p => p.type === 'minute').value)
+
+  return (parisHours * 60 + parisMinutes) - (utcHours * 60 + utcMinutes)
+}
+
+function formatDateParis(isoDate) {
+  return new Date(isoDate).toLocaleString('fr-FR', {
+    timeZone: 'Europe/Paris',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
 }
 
 function buildMatchEmbed(match) {
@@ -145,7 +187,7 @@ function buildMatchEmbed(match) {
       `✅ Bon résultat **5 pts**\n` +
       `🎯 Score exact **+15 pts bonus**\n` +
       `⚽ Bon buteur **+10 pts bonus**\n\n` +
-      `⏰ Clôture : **${formatDate(match.cloture)}**`
+      `⏰ Clôture : **${formatDateParis(match.cloture)}**`
     )
     .setColor('#0055A4')
     .setFooter({ text: `ID : ${match.id}` })
@@ -173,6 +215,24 @@ function buildClosedButton() {
   )
 }
 
+async function buildClassementEmbed() {
+  const sorted = [...scores.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 20)
+  const medals = ['🥇', '🥈', '🥉']
+  const desc = sorted.length > 0
+    ? sorted.map(([userId, data], i) => {
+        const medal = medals[i] || `**${i + 1}.**`
+        return `${medal} <@${userId}> **${data.total} pts**`
+      }).join('\n')
+    : 'Aucun point pour l\'instant.'
+
+  return new EmbedBuilder()
+    .setTitle('🏆 Classement Général')
+    .setDescription(desc)
+    .setColor('#0055A4')
+    .setFooter({ text: 'Classement publié manuellement' })
+    .setTimestamp()
+}
+
 client.on('ready', async () => {
   console.log(`Bot connecté : ${client.user.tag}`)
   await registerCommands()
@@ -181,9 +241,12 @@ client.on('ready', async () => {
 
 client.on('interactionCreate', async interaction => {
 
+  const isAdmin = interaction.isChatInputCommand()
+    ? interaction.member.permissions.has('Administrator')
+    : false
+
   // CRÉER UN MATCH
   if (interaction.isChatInputCommand() && interaction.commandName === 'creer-match') {
-    const isAdmin = interaction.member.permissions.has('Administrator')
     if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
 
     await interaction.deferReply({ ephemeral: true })
@@ -191,17 +254,30 @@ client.on('interactionCreate', async interaction => {
     const titre = interaction.options.getString('titre')
     const adversaire = interaction.options.getString('adversaire')
     const date = interaction.options.getString('date')
-    const cloture = interaction.options.getString('cloture')
+    const clotureStr = interaction.options.getString('cloture')
     const image = interaction.options.getString('image')
     const buteursMatch = interaction.options.getString('buteurs').split(',').map(b => b.trim()).filter(Boolean)
 
-    const closingDate = new Date(cloture)
-    if (isNaN(closingDate.getTime())) {
-      return interaction.editReply({ content: '❌ Format de date invalide. Utilise le format : 2026-09-28 20:00' })
+    let closingDate
+    try {
+      closingDate = parseDateParis(clotureStr)
+      if (isNaN(closingDate.getTime())) throw new Error('Date invalide')
+    } catch (e) {
+      return interaction.editReply({ content: '❌ Format de date invalide. Utilise : 2026-09-28 20:00' })
     }
 
     const matchId = `MATCH_${Date.now()}`
-    const match = { id: matchId, titre, adversaire, date, cloture, image, buteurs: buteursMatch, statut: 'ouvert', messageId: null }
+    const match = {
+      id: matchId,
+      titre,
+      adversaire,
+      date,
+      cloture: closingDate.toISOString(),
+      image,
+      buteurs: buteursMatch,
+      statut: 'ouvert',
+      messageId: null
+    }
 
     matches.set(matchId, match)
     pronos.set(matchId, {})
@@ -217,14 +293,15 @@ client.on('interactionCreate', async interaction => {
     matches.set(matchId, match)
     await saveData()
 
-    scheduleAutoClose(matchId, cloture)
+    scheduleAutoClose(matchId, closingDate.toISOString())
 
-    await interaction.editReply({ content: `✅ Match créé ! ID : \`${matchId}\`\nFermeture automatique le **${formatDate(cloture)}**` })
+    await interaction.editReply({
+      content: `✅ Match créé !\n**ID :** \`${matchId}\`\nFermeture automatique le **${formatDateParis(closingDate.toISOString())}**`
+    })
   }
 
-  // FERMER UN MATCH MANUELLEMENT
+  // FERMER UN MATCH
   if (interaction.isChatInputCommand() && interaction.commandName === 'fermer-match') {
-    const isAdmin = interaction.member.permissions.has('Administrator')
     if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
 
     await interaction.deferReply({ ephemeral: true })
@@ -392,9 +469,8 @@ client.on('interactionCreate', async interaction => {
     })
   }
 
-  // COMMANDE RÉSULTAT
+  // COMMANDE RÉSULTAT — avec sélection des buteurs parmi ceux du match
   if (interaction.isChatInputCommand() && interaction.commandName === 'resultat') {
-    const isAdmin = interaction.member.permissions.has('Administrator')
     if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
 
     await interaction.deferReply({ ephemeral: true })
@@ -402,11 +478,39 @@ client.on('interactionCreate', async interaction => {
     const matchId = interaction.options.getString('id')
     const resultat = interaction.options.getString('resultat')
     const score = interaction.options.getString('score')
-    const buteursStr = interaction.options.getString('buteurs') || ''
-    const buteurs = buteursStr === 'aucun' ? [] : buteursStr.split(',').map(b => b.trim().toLowerCase()).filter(Boolean)
 
     const match = matches.get(matchId)
     if (!match) return interaction.editReply({ content: '❌ Match introuvable.' })
+
+    // Proposer les buteurs du match comme sélection
+    const selectButeurs = new StringSelectMenuBuilder()
+      .setCustomId(`resultat_buteurs_${matchId}_${resultat}_${encodeURIComponent(score)}`)
+      .setPlaceholder('Sélectionne les buteurs ayant marqué')
+      .setMinValues(1)
+      .setMaxValues(match.buteurs.length + 1)
+      .addOptions([
+        ...match.buteurs.map(j => ({ label: j, value: j })),
+        { label: 'Aucun buteur', value: 'aucun', emoji: '🚫' }
+      ])
+
+    await interaction.editReply({
+      content: `**Match :** ${match.titre}\n**Résultat :** ${resultat}\n**Score :** ${score}\n\nSélectionne les buteurs ayant marqué :`,
+      components: [new ActionRowBuilder().addComponents(selectButeurs)]
+    })
+  }
+
+  // SELECT BUTEURS RÉSULTAT
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('resultat_buteurs_')) {
+    await interaction.deferUpdate()
+
+    const parts = interaction.customId.split('_')
+    const matchId = parts[2]
+    const resultat = parts[3]
+    const score = decodeURIComponent(parts[4])
+    const buteurs = interaction.values.includes('aucun') ? [] : interaction.values.map(b => b.toLowerCase())
+
+    const match = matches.get(matchId)
+    if (!match) return interaction.followUp({ content: '❌ Match introuvable.', ephemeral: true })
 
     match.statut = 'terminé'
     matches.set(matchId, match)
@@ -438,9 +542,13 @@ client.on('interactionCreate', async interaction => {
       defaite_france: `Victoire ${match.adversaire}`
     }
 
-    const staffChannel = await client.channels.fetch(STAFF_CHANNEL_ID)
-    const gainsList = Object.values(gainsPts).sort((a, b) => b.pts - a.pts).slice(0, 10).map(g => `**${g.username}** +${g.pts} pts`).join('\n')
+    const gainsList = Object.values(gainsPts)
+      .sort((a, b) => b.pts - a.pts)
+      .slice(0, 10)
+      .map(g => `**${g.username}** +${g.pts} pts`)
+      .join('\n')
 
+    const staffChannel = await client.channels.fetch(STAFF_CHANNEL_ID)
     await staffChannel.send({
       embeds: [new EmbedBuilder()
         .setTitle(`✅ Résultats ${match.titre}`)
@@ -448,20 +556,73 @@ client.on('interactionCreate', async interaction => {
           `**Résultat :** ${resultatLabels[resultat]}\n` +
           `**Score :** ${score}\n` +
           `**Buteurs :** ${buteurs.length > 0 ? buteurs.join(', ') : 'Aucun'}\n\n` +
-          `**Top gagnants :**\n${gainsList || 'Aucun'}`
+          `**Points distribués — Top gagnants :**\n${gainsList || 'Aucun'}\n\n` +
+          `⚠️ Le classement n\'a pas été mis à jour automatiquement. Utilise **/publier-classement** quand tu es prêt.`
         )
         .setColor('#00C853')]
     })
 
-    await updateClassement()
-    await interaction.editReply({ content: `✅ Résultat enregistré et points distribués !` })
+    await interaction.followUp({ content: '✅ Résultat enregistré et points distribués ! Utilise **/publier-classement** pour mettre à jour le classement.', ephemeral: true })
   }
 
-  // CLASSEMENT
-  if (interaction.isChatInputCommand() && interaction.commandName === 'classement') {
-    await interaction.deferReply()
+  // PUBLIER CLASSEMENT
+  if (interaction.isChatInputCommand() && interaction.commandName === 'publier-classement') {
+    if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
+
+    await interaction.deferReply({ ephemeral: true })
+
     const embed = await buildClassementEmbed()
-    await interaction.editReply({ embeds: [embed] })
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('voir_ma_position')
+        .setLabel('Voir ma position')
+        .setStyle(ButtonStyle.Secondary)
+    )
+
+    const channel = await client.channels.fetch(CLASSEMENT_CHANNEL_ID)
+
+    if (classementMessageId) {
+      try {
+        const existingMsg = await channel.messages.fetch(classementMessageId)
+        await existingMsg.edit({ embeds: [embed], components: [row] })
+      } catch (e) {
+        const newMsg = await channel.send({ embeds: [embed], components: [row] })
+        classementMessageId = newMsg.id
+      }
+    } else {
+      const newMsg = await channel.send({ embeds: [embed], components: [row] })
+      classementMessageId = newMsg.id
+    }
+
+    await saveData()
+    await interaction.editReply({ content: '✅ Classement publié !' })
+  }
+
+  // BOUTON VOIR MA POSITION
+  if (interaction.isButton() && interaction.customId === 'voir_ma_position') {
+    const userId = interaction.user.id
+    const sorted = [...scores.entries()].sort((a, b) => b[1].total - a[1].total)
+    const position = sorted.findIndex(([id]) => id === userId) + 1
+    const userScore = scores.get(userId)
+
+    if (!userScore) {
+      return interaction.reply({ content: '❌ Tu n\'as pas encore de points.', ephemeral: true })
+    }
+
+    await interaction.reply({
+      content: `📊 **Ta position dans le classement :**\n\n**#${position}** sur ${sorted.length} joueurs\n**Points :** ${userScore.total} pts`,
+      ephemeral: true
+    })
+  }
+
+  // RESET CLASSEMENT
+  if (interaction.isChatInputCommand() && interaction.commandName === 'reset-classement') {
+    if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
+
+    scores.clear()
+    await saveData()
+
+    await interaction.reply({ content: '✅ Classement remis à zéro.', ephemeral: true })
   }
 
   // MON PRONO
@@ -497,43 +658,11 @@ client.on('interactionCreate', async interaction => {
 
   // LIST MATCHS
   if (interaction.isChatInputCommand() && interaction.commandName === 'listmatchs') {
-    const isAdmin = interaction.member.permissions.has('Administrator')
     if (!isAdmin) return interaction.reply({ content: 'Permission refusée.', ephemeral: true })
 
-    const list = [...matches.values()].map(m => `**${m.titre}** ${m.statut} ID: \`${m.id}\` Clôture: ${formatDate(m.cloture)}`).join('\n')
+    const list = [...matches.values()].map(m => `**${m.titre}** ${m.statut} ID: \`${m.id}\` Clôture: ${formatDateParis(m.cloture)}`).join('\n')
     await interaction.reply({ content: list || 'Aucun match.', ephemeral: true })
   }
 })
-
-async function buildClassementEmbed() {
-  const sorted = [...scores.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 10)
-  const medals = ['🥇', '🥈', '🥉']
-  const desc = sorted.map(([userId, data], i) => {
-    const medal = medals[i] || `**${i + 1}.**`
-    return `${medal} <@${userId}> **${data.total} pts**`
-  }).join('\n')
-
-  return new EmbedBuilder()
-    .setTitle('🏆 Classement Général')
-    .setDescription(desc || 'Aucun point pour l\'instant.')
-    .setColor('#0055A4')
-    .setFooter({ text: 'Classement mis à jour après chaque match' })
-}
-
-async function updateClassement() {
-  try {
-    const channel = await client.channels.fetch(CLASSEMENT_CHANNEL_ID)
-    const messages = await channel.messages.fetch({ limit: 5 })
-    const existing = messages.find(m => m.author.id === client.user.id)
-    const embed = await buildClassementEmbed()
-    if (existing) {
-      await existing.edit({ embeds: [embed] })
-    } else {
-      await channel.send({ embeds: [embed] })
-    }
-  } catch (e) {
-    console.error('Erreur mise à jour classement:', e.message)
-  }
-}
 
 client.login(TOKEN)
